@@ -1,15 +1,22 @@
 #!/usr/bin/env bash
 #
 # ╔════════════════════════════════════════════════════════════════════════════╗
-# ║  Debian 12 NVMe Migration Script v1.1 (Enhanced)                          ║
+# ║  Debian 12 NVMe Migration Script v1.2 (Enhanced)                          ║
 # ║  Root 37GB + LVM /home                                                     ║
 # ║  UEFI / BIOS detection, pvmove optional                                    ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
 #
 # Author: karen20ced4
 # Repository: https://github.com/karen20ced4/NVME-Migrate
-# Version: 1.1
-# Date: 2025-01-19
+# Version: 1.2
+# Date: 2025-10-19
+#
+# Changelog v1.2:
+# - Fix lsblk: afișare corectă disk-uri (compatibilitate util-linux)
+# - Afișare îmbunătățită device-uri USB/SATA/NVMe
+# - Verificare robustă pentru toate tipurile de adaptoare USB-NVMe
+# - Header cu informații versiune și dată
+# - Mesaje de așteptare pentru detectare USB
 #
 # Changelog v1.1:
 # - Adăugat verificare comenzi necesare
@@ -30,6 +37,14 @@
 
 set -euo pipefail
 IFS=$'\n\t'
+
+# ═══════════════════════════════════════════════════════════════════════════
+#  SCRIPT INFO
+# ═══════════════════════════════════════════════════════════════════════════
+SCRIPT_VERSION="1.2"
+SCRIPT_DATE="2025-10-19"
+SCRIPT_AUTHOR="karen20ced4"
+SCRIPT_REPO="https://github.com/karen20ced4/NVME-Migrate"
 
 # ═══════════════════════════════════════════════════════════════════════════
 #  COLOR DEFINITIONS
@@ -54,10 +69,12 @@ fi
 print_header() {
     echo -e "${CYAN}${BOLD}"
     echo "╔════════════════════════════════════════════════════════════════════════════╗"
-    echo "║  Debian 12 NVMe Migration Script v1.1                                      ║"
+    echo "║  Debian 12 NVMe Migration Script v${SCRIPT_VERSION}                                      ║"
     echo "║  Root 37GB + LVM /home + UEFI/BIOS auto-detection                         ║"
     echo "╚════════════════════════════════════════════════════════════════════════════╝"
     echo -e "${NC}"
+    echo -e "${DIM}Version: ${SCRIPT_VERSION} | Date: ${SCRIPT_DATE} | Author: ${SCRIPT_AUTHOR}${NC}"
+    echo -e "${DIM}Repository: ${SCRIPT_REPO}${NC}\n"
 }
 
 print_step() {
@@ -242,8 +259,34 @@ fi
 print_step $((++CURRENT_STEP)) $TOTAL_STEPS "Selectare dispozitiv NVMe nou"
 # ───────────────────────────────────────────────────────────────────────────
 
-echo -e "\n${BOLD}Dispozitive disponibile:${NC}"
-lsblk -o NAME,SIZE,MODEL,TRAN,FSTYPE | grep -E "NAME|disk|nvme|sd[a-z]$" || lsblk -o NAME,SIZE,MODEL,TRAN
+echo -e "\n${BOLD}Dispozitive de stocare disponibile:${NC}"
+echo -e "${DIM}(disk-uri fizice: HDD, SSD, NVMe, USB)${NC}\n"
+
+# Afișare simplă și robustă - funcționează pe toate versiunile de util-linux
+# Eliminăm loop devices și CD/DVD-uri
+lsblk -d -p -o NAME,SIZE,MODEL,TRAN 2>/dev/null | while IFS= read -r line; do
+    # Skip loop devices și CD/DVD
+    if [[ "$line" =~ loop|sr[0-9] ]]; then
+        continue
+    fi
+    
+    if [[ "$line" =~ ^NAME ]]; then
+        # Header cu bold
+        echo -e "  ${BOLD}$line${NC}"
+    else
+        # Device entries
+        echo "  $line"
+    fi
+done
+
+echo -e "\n${BOLD}Vedere detaliată (cu partiții și filesystem-uri):${NC}"
+lsblk -o NAME,SIZE,MODEL,TRAN,FSTYPE,MOUNTPOINT
+
+echo -e "\n${CYAN}${BOLD}NOTĂ:${NC} ${DIM}Dacă ai conectat noul NVMe prin USB și nu apare mai sus:${NC}"
+echo -e "${DIM}  1) Deconectează și reconectează case-ul USB${NC}"
+echo -e "${DIM}  2) Așteaptă 10 secunde${NC}"
+echo -e "${DIM}  3) Verifică cu: sudo dmesg | tail -20${NC}"
+echo -e "${DIM}  4) Apoi rulează din nou scriptul${NC}"
 
 echo ""
 read -rp "$(echo -e ${CYAN}${BOLD}Introdu noul NVMe${NC}${CYAN} [ex: /dev/sdb sau /dev/nvme1n1]: ${NC})" NEW_DISK
@@ -276,7 +319,9 @@ fi
 # Afișare info despre disc
 NEW_DISK_SIZE=$(lsblk -bno SIZE "$NEW_DISK" 2>/dev/null || echo 0)
 NEW_DISK_SIZE_GB=$((NEW_DISK_SIZE / 1024**3))
+NEW_DISK_MODEL=$(lsblk -dno MODEL "$NEW_DISK" 2>/dev/null | xargs || echo "Unknown")
 print_info "Mărime disc nou: ${BOLD}${NEW_DISK_SIZE_GB} GB${NC} ($(numfmt --to=iec $NEW_DISK_SIZE))"
+print_info "Model: ${BOLD}${NEW_DISK_MODEL}${NC}"
 
 echo -e "\n${RED}${BOLD}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
 echo -e "${RED}${BOLD}║  ⚠️  AVERTISMENT: TOATE DATELE DE PE $NEW_DISK VOR FI ȘTERSE! ⚠️       ║${NC}"
@@ -540,7 +585,7 @@ fi
 
 # Generare fstab nou
 cat > /mnt/newroot/etc/fstab <<EOF
-# /etc/fstab - generat de nvme-migrate-lvm-soft v1.1
+# /etc/fstab - generat de nvme-migrate-lvm-soft v${SCRIPT_VERSION}
 # $(date)
 
 # Root filesystem
@@ -669,7 +714,7 @@ echo -e "${GREEN}${BOLD}╚═════════════════�
 
 echo -e "${CYAN}${BOLD}Rezumat configurație:${NC}"
 echo -e "  • Boot mode: ${BOLD}$BOOT_MODE${NC}"
-echo -e "  • Disc nou: ${BOLD}$NEW_DISK${NC} (${NEW_DISK_SIZE_GB} GB)"
+echo -e "  • Disc nou: ${BOLD}$NEW_DISK${NC} (${NEW_DISK_SIZE_GB} GB, ${NEW_DISK_MODEL})"
 echo -e "  • Root: ${BOLD}$NEW_ROOT${NC} (${ROOT_SIZE_GI} GiB, ext4)"
 echo -e "  • Swap: ${BOLD}$NEW_SWAP${NC} (${SWAP_SIZE_GI} GiB)"
 if [ "$BOOT_MODE" = "UEFI" ]; then
@@ -777,10 +822,11 @@ fi
 # ───────────────────────────────────────────────────────────────────────────
 
 echo -e "\n${GREEN}${BOLD}╔═══════════════════════════════════════════════════════════════════════╗${NC}"
-echo -e "${GREEN}${BOLD}║  ✔ SCRIPT TERMINAT CU SUCCES!                                        ║${NC}"
+echo -e "${GREEN}${BOLD}║  ✔ SCRIPT TERMINAT CU SUCCES! (v${SCRIPT_VERSION})                              ║${NC}"
 echo -e "${GREEN}${BOLD}╚═══════════════════════════════════════════════════════════════════════╝${NC}\n"
 
 print_info "Log-ul complet poate fi găsit cu: journalctl -xe"
-print_info "Pentru suport: https://github.com/karen20ced4/NVME-Migrate"
+print_info "Pentru suport: $SCRIPT_REPO"
+print_info "Script version: ${SCRIPT_VERSION} | Date: ${SCRIPT_DATE}"
 
 exit 0
