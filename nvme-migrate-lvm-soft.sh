@@ -1,15 +1,21 @@
 #!/usr/bin/env bash
 #
 # ╔════════════════════════════════════════════════════════════════════════════╗
-# ║  Debian 12 NVMe Migration Script v1.2 (Enhanced)                          ║
-# ║  Root 37GB + LVM /home                                                     ║
-# ║  UEFI / BIOS detection, pvmove optional                                    ║
+# ║  Debian 12 NVMe Migration Script v1.3 (Fixed BIOS Boot)                   ║
+# ║  Root 37GB + LVM /home + UEFI/BIOS auto-detection                         ║
 # ╚════════════════════════════════════════════════════════════════════════════╝
 #
 # Author: karen20ced4
 # Repository: https://github.com/karen20ced4/NVME-Migrate
-# Version: 1.2
-# Date: 2025-10-19
+# Version: 1.3
+# Date: 2025-10-20
+#
+# Changelog v1.3:
+# - FIX CRITICAL: Added BIOS Boot Partition for GPT+BIOS systems
+# - BIOS mode now creates 4 partitions (p1=BIOS Boot, p2=root, p3=swap, p4=LVM)
+# - Auto-install grub-pc in chroot if missing (BIOS mode)
+# - Fixed partition numbering: root is now p2 (not p1) in BIOS mode
+# - Added better error handling for GRUB installation
 #
 # Changelog v1.2:
 # - Fix lsblk: afișare corectă disk-uri (compatibilitate util-linux)
@@ -41,8 +47,8 @@ IFS=$'\n\t'
 # ═══════════════════════════════════════════════════════════════════════════
 #  SCRIPT INFO
 # ═══════════════════════════════════════════════════════════════════════════
-SCRIPT_VERSION="1.2"
-SCRIPT_DATE="2025-10-19"
+SCRIPT_VERSION="1.3"
+SCRIPT_DATE="2025-10-20"
 SCRIPT_AUTHOR="karen20ced4"
 SCRIPT_REPO="https://github.com/karen20ced4/NVME-Migrate"
 
@@ -339,31 +345,75 @@ print_step $((++CURRENT_STEP)) $TOTAL_STEPS "Creare tabel partiții și partiți
 ROOT_SIZE_GI=37
 print_info "Schema partiții: Root=${ROOT_SIZE_GI}GiB, Swap=${SWAP_SIZE_GI}GiB, Rest=LVM/ESP"
 
-# Creare tabel GPT
-parted -s "$NEW_DISK" mklabel gpt 2>/dev/null || {
-    print_error "Eroare la creare tabel partiții GPT"
-    exit 1
-}
-print_success "Tabel GPT creat"
-
-# Partiție 1: Root (ext4)
-parted -s "$NEW_DISK" mkpart primary ext4 1MiB "${ROOT_SIZE_GI}GiB" 2>/dev/null
-print_success "Partiție 1 (root): 1MiB - ${ROOT_SIZE_GI}GiB"
-
-# Partiție 2: Swap
-parted -s "$NEW_DISK" mkpart primary linux-swap "${ROOT_SIZE_GI}GiB" "$((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB" 2>/dev/null
-print_success "Partiție 2 (swap): ${ROOT_SIZE_GI}GiB - $((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB"
-
-# Partiție 3: LVM (BIOS) sau ESP (UEFI)
 if [ "$BOOT_MODE" = "UEFI" ]; then
+    # ===== UEFI mode: GPT cu ESP =====
+    parted -s "$NEW_DISK" mklabel gpt 2>/dev/null || {
+        print_error "Eroare la creare tabel partiții GPT"
+        exit 1
+    }
+    print_success "Tabel GPT creat (UEFI)"
+
+    # Partiție 1: Root (ext4)
+    parted -s "$NEW_DISK" mkpart primary ext4 1MiB "${ROOT_SIZE_GI}GiB" 2>/dev/null
+    print_success "Partiție 1 (root): 1MiB - ${ROOT_SIZE_GI}GiB"
+
+    # Partiție 2: Swap
+    parted -s "$NEW_DISK" mkpart primary linux-swap "${ROOT_SIZE_GI}GiB" "$((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB" 2>/dev/null
+    print_success "Partiție 2 (swap): ${ROOT_SIZE_GI}GiB - $((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB"
+
+    # Partiție 3: ESP (EFI System Partition)
     parted -s "$NEW_DISK" mkpart ESP fat32 "$((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB" 100% 2>/dev/null
     parted -s "$NEW_DISK" set 3 boot on 2>/dev/null
     parted -s "$NEW_DISK" set 3 esp on 2>/dev/null
     print_success "Partiție 3 (ESP): $((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB - 100%"
+
+    # Nume partiții
+    if [[ "$NEW_DISK" =~ nvme ]]; then
+        NEW_ROOT="${NEW_DISK}p1"
+        NEW_SWAP="${NEW_DISK}p2"
+        NEW_EXTRA="${NEW_DISK}p3"
+    else
+        NEW_ROOT="${NEW_DISK}1"
+        NEW_SWAP="${NEW_DISK}2"
+        NEW_EXTRA="${NEW_DISK}3"
+    fi
+
 else
+    # ===== BIOS mode: GPT cu BIOS Boot Partition =====
+    parted -s "$NEW_DISK" mklabel gpt 2>/dev/null || {
+        print_error "Eroare la creare tabel partiții GPT"
+        exit 1
+    }
+    print_success "Tabel GPT creat (BIOS)"
+
+    # Partiție 1: BIOS Boot Partition (1-2 MiB, fără filesystem)
+    parted -s "$NEW_DISK" mkpart primary 1MiB 2MiB 2>/dev/null
+    parted -s "$NEW_DISK" set 1 bios_grub on 2>/dev/null
+    print_success "Partiție 1 (BIOS Boot): 1MiB - 2MiB"
+
+    # Partiție 2: Root (ext4)
+    parted -s "$NEW_DISK" mkpart primary ext4 2MiB "${ROOT_SIZE_GI}GiB" 2>/dev/null
+    print_success "Partiție 2 (root): 2MiB - ${ROOT_SIZE_GI}GiB"
+
+    # Partiție 3: Swap
+    parted -s "$NEW_DISK" mkpart primary linux-swap "${ROOT_SIZE_GI}GiB" "$((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB" 2>/dev/null
+    print_success "Partiție 3 (swap): ${ROOT_SIZE_GI}GiB - $((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB"
+
+    # Partiție 4: LVM
     parted -s "$NEW_DISK" mkpart primary "$((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB" 100% 2>/dev/null
-    parted -s "$NEW_DISK" set 3 lvm on 2>/dev/null
-    print_success "Partiție 3 (LVM): $((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB - 100%"
+    parted -s "$NEW_DISK" set 4 lvm on 2>/dev/null
+    print_success "Partiție 4 (LVM): $((ROOT_SIZE_GI + SWAP_SIZE_GI))GiB - 100%"
+
+    # Nume partiții (BIOS are 4 partiții, nu 3!)
+    if [[ "$NEW_DISK" =~ nvme ]]; then
+        NEW_ROOT="${NEW_DISK}p2"  # root e p2 (p1 = BIOS Boot)
+        NEW_SWAP="${NEW_DISK}p3"
+        NEW_EXTRA="${NEW_DISK}p4" # LVM e p4
+    else
+        NEW_ROOT="${NEW_DISK}2"
+        NEW_SWAP="${NEW_DISK}3"
+        NEW_EXTRA="${NEW_DISK}4"
+    fi
 fi
 
 # Update kernel partition table
@@ -371,17 +421,6 @@ print_info "Actualizare tabel partiții în kernel..."
 partprobe "$NEW_DISK" 2>/dev/null || true
 udevadm settle --timeout=10 2>/dev/null || true
 sleep 2
-
-# Determinare nume partiții
-if [[ "$NEW_DISK" =~ nvme ]]; then
-    NEW_ROOT="${NEW_DISK}p1"
-    NEW_SWAP="${NEW_DISK}p2"
-    NEW_EXTRA="${NEW_DISK}p3"
-else
-    NEW_ROOT="${NEW_DISK}1"
-    NEW_SWAP="${NEW_DISK}2"
-    NEW_EXTRA="${NEW_DISK}3"
-fi
 
 # Verificare existență device nodes
 for part in "$NEW_ROOT" "$NEW_SWAP" "$NEW_EXTRA"; do
@@ -552,12 +591,27 @@ else
     print_info "Instalare GRUB (BIOS/MBR mode)..."
     chroot /mnt/newroot /bin/bash -c "
         set -e
+        # Instalează grub-pc dacă lipsește
+        if ! dpkg -l grub-pc 2>/dev/null | grep -q '^ii'; then
+            echo 'grub-pc grub-pc/install_devices multiselect' | debconf-set-selections
+            echo 'grub-pc grub-pc/install_devices_empty boolean true' | debconf-set-selections
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y grub-pc grub-pc-bin
+        fi
         update-initramfs -u -k all 2>&1 | grep -v 'which: no'
         grub-install --target=i386-pc --recheck $NEW_DISK 2>&1
         update-grub 2>&1
     " || {
         print_error "Eroare la instalare GRUB BIOS"
-        exit 1
+        print_info "Încerc instalare manuală grub-pc..."
+        chroot /mnt/newroot bash -c "
+            echo 'grub-pc grub-pc/install_devices multiselect' | debconf-set-selections
+            echo 'grub-pc grub-pc/install_devices_empty boolean true' | debconf-set-selections
+            apt-get update -qq
+            DEBIAN_FRONTEND=noninteractive apt-get install -y grub-pc grub-pc-bin
+            grub-install --target=i386-pc --recheck $NEW_DISK
+            update-grub
+        " || exit 1
     }
     print_success "GRUB instalat (BIOS) pe $NEW_DISK"
 fi
